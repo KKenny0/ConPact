@@ -1,9 +1,9 @@
 ---
-name: subagent-brief
-description: "Construct a complete, self-contained briefing before delegating any task to a coding subagent. Use when spawning or delegating to a coding subagent via: (1) OpenClaw sessions_spawn, (2) Codex exec, (3) Claude Code --print, (4) any framework where a parent agent hands off a bounded task to a child agent. Ensures complete context transfer so the subagent can start work immediately with zero follow-up questions."
+name: ConPact
+description: "Multi-Agent Contract Protocol — a structured, file-based protocol for coordinating multiple coding agents (Claude Code, Codex, OpenClaw workers) via shared filesystem. Use when setting up multi-agent workflows, delegating tasks between agents, or establishing cross-agent communication in tmux split-pane, shared-project, or any environment where agents share a filesystem."
 ---
 
-# subagent-brief
+# ConPact
 
 Fill all six required categories before delegating. Add the seventh when the task is non-trivial.
 

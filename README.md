@@ -1,64 +1,93 @@
-# subagent-brief 📋
+# ConPact
 
-**Methodology for constructing high-quality delegation context when handing off tasks from a parent agent to a coding subagent.**
+**Multi-Agent Contract Protocol** — Structured file-based coordination for coding agents.
 
 ## Problem
 
-When a parent agent (main session) delegates a task to a coding subagent (Codex, Claude Code, OpenClaw sessions_spawn, etc.), the context it passes often lacks critical information — missing file paths, unclear task boundaries, unstated constraints. The subagent then either guesses wrong, scopes creeps, or has to ask follow-up questions that break the flow.
+When multiple coding agents (Claude Code, Codex, OpenClaw workers) operate on the same project, they lack a structured way to delegate tasks, track progress, and report results. The "tmux split-pane" approach — running agents side by side and hoping they figure out how to communicate — is unreliable and token-wasteful.
 
 **Result:** wasted tokens, rework, and unreliable output.
 
 ## Solution
 
-`subagent-brief` is an OpenClaw skill that provides a structured briefing methodology. Before spawning any coding subagent, the parent agent fills out a six-category template:
+ConPact defines a lightweight, pure-documentation protocol that any agent can follow by reading a SKILL.md. The core concept is a **contract** — a single JSON file that carries a task through its entire lifecycle, from delegation to completion.
 
-| Category | Purpose | Compressible? |
-|----------|---------|:------------:|
-| **Objective** | One-sentence goal + deliverables | ❌ |
-| **Background** | Why this task exists | ✅ |
-| **Task Boundary** | Do / Don't do | ❌ |
-| **Key References** | File paths + purposes | structure ❌, description ✅ |
-| **Constraints** | Tech constraints, coding standards | items ❌, detail ✅ |
-| **Acceptance Criteria** | Executable verification steps | ❌ |
-| **Suggested Steps** *(optional)* | Recommended execution order | ✅ |
+### How it works
 
-The skill also includes:
-- **Reference vs Inline decision rules** — what to inline vs what to pass as a path, depending on subagent access
-- **Completeness check** — a self-check protocol with a core question and 7-item checklist
-- **Common failure patterns** — 7 typical mistakes and how each category prevents them
+1. **Agent A** creates a contract file in `.agents/contracts/`, specifying the task and assignee
+2. **Agent B** discovers the contract (via filename-based polling), claims it, and starts work
+3. **Agent B** submits results back into the same contract file
+4. **Agent A** reviews the result and closes the contract
+
+All communication happens through the shared filesystem. No scripts, no MCP servers, no runtime dependencies.
+
+### Key features
+
+| Feature | Description |
+|---------|-------------|
+| **Peer-to-peer** | Any agent can delegate to any other — no central coordinator required |
+| **Multi-agent** | Supports 3+ agents coordinating simultaneously |
+| **Contract lifecycle** | State machine: `draft → assigned → in_progress → submitted → reviewed → closed` |
+| **Atomic writes** | Write-to-temp + verify + rename pattern prevents concurrent write conflicts |
+| **Four capabilities** | Built around Delegation, Description, Discernment, and Diligence |
+| **Framework-agnostic** | Works with Claude Code, Codex, OpenClaw, or any agent with filesystem access |
+
+## Protocol Overview
+
+### Directory structure
+
+```
+.agents/
+├── registry.json              # Optional agent directory (weak dependency)
+├── contracts/
+│   ├── @<assignee>.<id>.json  # Active contracts
+│   └── _archive/              # Closed contracts
+```
+
+### Contract structure
+
+A contract is a single JSON file with four sections:
+
+| Section | Capability | Purpose |
+|---------|-----------|---------|
+| `delegation` | Delegation + Description | Task specification (reuses subagent-brief's 7-category template) |
+| `diligence` | Diligence | Progress tracking and blocker reporting |
+| `result` | — | Execution results: summary, files changed, verification |
+| `discernment` | Discernment | Review feedback and revision requests |
+
+### State machine
+
+```
+draft ──→ assigned ──→ in_progress ──→ submitted ──→ reviewed ──→ closed
+               ↑            ↑                        │
+               │            └── revision_needed ←─────┘
+```
 
 ## Installation
 
-### OpenClaw
+### As a Skill (Claude Code / OpenClaw)
 
 ```bash
-cp -r SKILL.md ~/.openclaw/skills/subagent-brief/
-```
-
-Then restart the gateway:
-```bash
-openclaw gateway restart
+cp -r . ~/.claude/skills/ConPact/
 ```
 
 ### Standalone
 
-The `SKILL.md` is a self-contained methodology document. You can use it as a prompt template or reference guide for any agent framework, not just OpenClaw.
+The `SKILL.md` is a self-contained protocol specification. Any agent can read it and follow the rules — no installation required beyond placing the file where the agent can access it.
 
 ## Usage
 
-When you're about to spawn or delegate to a coding subagent, read `SKILL.md` and follow the briefing template. The structure is designed to be directly executable — an agent can read it and produce a complete briefing without interpretation.
+See [SKILL.md](SKILL.md) for the full protocol specification and agent behavior rules.
 
-## Key Design Decisions
+See [docs/superpowers/specs/2026-04-14-contract-protocol-design.md](docs/superpowers/specs/2026-04-14-contract-protocol-design.md) for the design rationale and detailed field reference.
 
-1. **Seven categories, six required** — Suggested Steps is optional; simple tasks don't need execution order guidance
-2. **Examples are inline** — each category has ❌/✅ examples so the agent can self-calibrate
-3. **Pairing rule** — every file mentioned in the briefing must appear in Key References
-4. **Prior exploration** — if the parent agent tried something before, conclusions must be documented in Background
-5. **Critical Context** — a catch-all question for knowledge that doesn't fit the six categories but would cause a wrong path if missing
+## Name
+
+**ConPact** = **Con**tract + **Pact**, also a homophone of *compact* — reflecting the protocol's lightweight, zero-dependency design.
 
 ## Inspired By
 
-The structured template draws from Hermes Agent's [context compression algorithm](https://github.com/nousresearch/hermes-agent), which uses a similar six-field structure (Goal, Progress, Key Decisions, Relevant Files, Next Steps, Critical Context) for preserving context across compression boundaries. While Hermes uses this structure to compress history, `subagent-brief` uses it to construct context from scratch — proving the structure is a general-purpose "minimal complete information set" for agent handoffs.
+The structured delegation template draws from Hermes Agent's context compression algorithm, which uses a similar six-field structure for preserving context across compression boundaries. ConPact applies the same "minimal complete information set" principle to multi-agent coordination.
 
 ## License
 
