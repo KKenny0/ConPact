@@ -65,6 +65,26 @@ draft ──→ assigned ──→ in_progress ──→ submitted ──→ rev
 
 ## Installation
 
+### MCP Server (Recommended)
+
+ConPact ships as an MCP server. Install once, use in any MCP-compatible agent.
+
+```bash
+pip install -e .
+```
+
+Then register with your agent:
+
+```bash
+# Claude Code
+claude mcp add conpact -- python -m conpact_server
+
+# Codex (add to config.toml)
+[mcp_servers.conpact]
+command = "python"
+args = ["-m", "conpact_server"]
+```
+
 ### As a Skill (Claude Code / OpenClaw)
 
 ```bash
@@ -74,6 +94,14 @@ cp -r . ~/.claude/skills/ConPact/
 ### Standalone
 
 The `SKILL.md` is a self-contained protocol specification. Any agent can read it and follow the rules — no installation required beyond placing the file where the agent can access it.
+
+## Quick Start
+
+1. In your project, ask your agent: `conpact_init`
+2. Register: `conpact_register(agent_id="claude-code", role="architect")`
+3. Delegate: `conpact_create(caller_id="claude-code", assignee="codex", objective="...", ...)`
+4. Other agent checks: `conpact_check(agent_id="codex")`
+5. Claim → work → submit → review
 
 ## Usage
 
