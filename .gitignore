@@ -5,3 +5,9 @@ agents/
 
 # Documentation (local only)
 docs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
