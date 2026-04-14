@@ -50,7 +50,7 @@ A contract is a single JSON file with four sections:
 
 | Section | Capability | Purpose |
 |---------|-----------|---------|
-| `delegation` | Delegation + Description | Task specification (reuses subagent-brief's 7-category template) |
+| `delegation` | Delegation + Description | Task specification using the 7-category delegation template |
 | `diligence` | Diligence | Progress tracking and blocker reporting |
 | `result` | — | Execution results: summary, files changed, verification |
 | `discernment` | Discernment | Review feedback and revision requests |
