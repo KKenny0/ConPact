@@ -120,7 +120,7 @@ Ownership per state prevents conflicting writes:
 
 ### `delegation` — Task Specification
 
-The core of the contract. Seven categories — six required, one optional.
+The core of the contract. Seven categories — six required, one optional. For detailed guidance on filling each category (good/bad examples, common pitfalls, completeness check), read `references/delegation-template.md`.
 
 #### 1. `objective` (required)
 
