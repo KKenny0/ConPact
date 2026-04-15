@@ -1,121 +1,87 @@
 # ConPact
 
-**Multi-Agent Contract Protocol** — Structured file-based coordination for coding agents.
+**Multi-Agent Contract Protocol** — Coordinate multiple coding agents through structured filesystem contracts.
 
-## Problem
+## Why
 
-When multiple coding agents (Claude Code, Codex, OpenClaw workers) operate on the same project, they lack a structured way to delegate tasks, track progress, and report results. The "tmux split-pane" approach — running agents side by side and hoping they figure out how to communicate — is unreliable and token-wasteful.
+When multiple coding agents (Claude Code, Codex, OpenClaw) work on the same project, they need a way to delegate tasks, track progress, and report results. Without structured coordination, agents waste tokens, duplicate work, and produce unreliable output.
 
-**Result:** wasted tokens, rework, and unreliable output.
+## How It Works
 
-## Solution
-
-ConPact defines a lightweight, pure-documentation protocol that any agent can follow by reading a SKILL.md. The core concept is a **contract** — a single JSON file that carries a task through its entire lifecycle, from delegation to completion.
-
-### How it works
-
-1. **Agent A** creates a contract file in `.agents/contracts/`, specifying the task and assignee
-2. **Agent B** discovers the contract (via filename-based polling), claims it, and starts work
-3. **Agent B** submits results back into the same contract file
-4. **Agent A** reviews the result and closes the contract
-
-All communication happens through the shared filesystem. No scripts, no MCP servers, no runtime dependencies.
-
-### Key features
-
-| Feature | Description |
-|---------|-------------|
-| **Peer-to-peer** | Any agent can delegate to any other — no central coordinator required |
-| **Multi-agent** | Supports 3+ agents coordinating simultaneously |
-| **Contract lifecycle** | State machine: `draft → assigned → in_progress → submitted → reviewed → closed` |
-| **Atomic writes** | Write-to-temp + verify + rename pattern prevents concurrent write conflicts |
-| **Four capabilities** | Built around Delegation, Description, Discernment, and Diligence |
-| **Framework-agnostic** | Works with Claude Code, Codex, OpenClaw, or any agent with filesystem access |
-
-## Protocol Overview
-
-### Directory structure
+ConPact uses **contracts** — JSON files that carry a task through its full lifecycle. An MCP server provides 12 tools for creating, claiming, updating, and reviewing contracts. All state lives on the shared filesystem.
 
 ```
-.agents/
-├── registry.json              # Optional agent directory (weak dependency)
-├── contracts/
-│   ├── @<assignee>.<id>.json  # Active contracts
-│   └── _archive/              # Closed contracts
+Agent A delegates ──→ Agent B claims & works ──→ Agent B submits ──→ Agent A reviews
+     │                        │                        │                    │
+     └─ conpact_create        └─ conpact_claim          └─ conpact_submit   └─ conpact_review
 ```
 
-### Contract structure
+## Key Features
 
-A contract is a single JSON file with four sections:
+- **Peer-to-peer** — any agent can delegate to any other, no central coordinator
+- **12 MCP tools** — full lifecycle: init, register, create, check, claim, update, submit, review, close, read, list, reassign
+- **State machine enforcement** — every transition is validated
+- **Atomic writes** — prevents concurrent write corruption
+- **Framework-agnostic** — works with any MCP-compatible agent
 
-| Section | Capability | Purpose |
-|---------|-----------|---------|
-| `delegation` | Delegation + Description | Task specification using the 7-category delegation template |
-| `diligence` | Diligence | Progress tracking and blocker reporting |
-| `result` | — | Execution results: summary, files changed, verification |
-| `discernment` | Discernment | Review feedback and revision requests |
-
-### State machine
+## State Machine
 
 ```
-draft ──→ assigned ──→ in_progress ──→ submitted ──→ reviewed ──→ closed
-               ↑            ↑                        │
-               │            └── revision_needed ←─────┘
+assigned → in_progress → submitted → closed
+                            ↑            ↓
+                            └─ revision_needed
 ```
 
 ## Installation
-
-### MCP Server (Recommended)
-
-ConPact ships as an MCP server. Install once, use in any MCP-compatible agent.
 
 ```bash
 pip install -e .
 ```
 
-Then register with your agent:
+Register with your agent:
 
 ```bash
 # Claude Code
 claude mcp add conpact -- python -m conpact_server
 
-# Codex (add to config.toml)
+# Codex (config.toml)
 [mcp_servers.conpact]
 command = "python"
 args = ["-m", "conpact_server"]
 ```
 
-### As a Skill (Claude Code / OpenClaw)
-
-```bash
-cp -r . ~/.claude/skills/ConPact/
-```
-
-### Standalone
-
-The `SKILL.md` is a self-contained protocol specification. Any agent can read it and follow the rules — no installation required beyond placing the file where the agent can access it.
-
 ## Quick Start
 
-1. In your project, ask your agent: `conpact_init`
-2. Register: `conpact_register(agent_id="claude-code", role="architect")`
-3. Delegate: `conpact_create(caller_id="claude-code", assignee="codex", objective="...", ...)`
-4. Other agent checks: `conpact_check(agent_id="codex")`
-5. Claim → work → submit → review
+```
+1. conpact_init                                    # Enable coordination in your project
+2. conpact_register(agent_id="claude-code")        # Register your identity
+3. conpact_create(assignee="codex", objective=...)  # Delegate a task
+4. conpact_check(agent_id="codex")                 # Other agent picks up work
+5. conpact_submit → conpact_review                 # Submit and close the loop
+```
 
-## Usage
+## Protocol Structure
 
-See [SKILL.md](SKILL.md) for the full protocol specification and agent behavior rules.
+```
+.agents/
+├── registry.json              # Agent directory (optional)
+├── contracts/
+│   ├── @<assignee>.<id>.json  # Active contracts
+│   └── _archive/              # Closed contracts
+```
 
-See [docs/superpowers/specs/2026-04-14-contract-protocol-design.md](docs/superpowers/specs/2026-04-14-contract-protocol-design.md) for the design rationale and detailed field reference.
+Each contract has four sections:
+
+| Section | Purpose |
+|---------|---------|
+| `delegation` | Task spec: objective, boundaries, references, acceptance criteria |
+| `diligence` | Progress tracking and blocker reporting |
+| `result` | Execution summary, files changed, verification |
+| `discernment` | Review feedback and revision requests |
 
 ## Name
 
-**ConPact** = **Con**tract + **Pact**, also a homophone of *compact* — reflecting the protocol's lightweight, zero-dependency design.
-
-## Inspired By
-
-The structured delegation template draws from Hermes Agent's context compression algorithm, which uses a similar six-field structure for preserving context across compression boundaries. ConPact applies the same "minimal complete information set" principle to multi-agent coordination.
+**Con**tract + **Pact** — also a homophone of *compact*, reflecting the protocol's lightweight design.
 
 ## License
 
