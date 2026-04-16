@@ -3,16 +3,22 @@
 import json
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from conpact_server.registry import get_agent_liveness
 from conpact_server.paths import (
     get_contracts_dir,
     get_archive_dir,
     get_contract_path,
 )
-from conpact_server.schema import validate_delegation, generate_contract_id
+from conpact_server.schema import (
+    validate_delegation,
+    validate_log_entry,
+    generate_contract_id,
+)
 
 
 class ContractError(Exception):
@@ -46,7 +52,9 @@ def read_contract(path: Path) -> dict[str, Any]:
 def write_contract_atomic(path: Path, contract: dict[str, Any]) -> None:
     """Write contract atomically: write tmp -> rename."""
     tmp_path = path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(contract, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.write_text(
+        json.dumps(contract, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     # Atomic rename (on Windows, need os.replace)
     os.replace(tmp_path, path)
 
@@ -126,6 +134,7 @@ def create_contract(
     acceptance_criteria: list[str],
     suggested_steps: list[str] | None = None,
     priority: str = "medium",
+    verification: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a new contract."""
     validate_delegation(
@@ -135,6 +144,7 @@ def create_contract(
         references=references,
         constraints=constraints,
         acceptance_criteria=acceptance_criteria,
+        verification=verification,
     )
 
     existing_ids = _get_existing_ids(root)
@@ -142,7 +152,7 @@ def create_contract(
     now = _now_iso()
 
     contract: dict[str, Any] = {
-        "protocol_version": "1.0",
+        "protocol_version": "1.1",
         "id": contract_id,
         "status": "assigned",
         "from": caller_id,
@@ -158,10 +168,13 @@ def create_contract(
             "constraints": constraints,
             "acceptance_criteria": acceptance_criteria,
             "suggested_steps": suggested_steps,
+            "verification": verification,
         },
         "diligence": None,
         "result": None,
         "discernment": None,
+        "log": [],
+        "verification_results": [],
         "last_diligence_at": None,
     }
 
@@ -175,7 +188,9 @@ def claim_contract(*, root: Path, caller_id: str, contract_id: str) -> dict[str,
     path, contract = find_contract_by_id(root, contract_id)
 
     if contract["assignee"] != caller_id:
-        raise ContractError(f"Assignee mismatch: contract assigned to '{contract['assignee']}', not '{caller_id}'")
+        raise ContractError(
+            f"Assignee mismatch: contract assigned to '{contract['assignee']}', not '{caller_id}'"
+        )
 
     if not can_transition(contract["status"], "in_progress"):
         raise ContractError(f"Cannot claim contract in status '{contract['status']}'")
@@ -201,13 +216,21 @@ def update_progress(
     path, contract = find_contract_by_id(root, contract_id)
 
     if contract["assignee"] != caller_id:
-        raise ContractError(f"Assignee mismatch: contract assigned to '{contract['assignee']}'")
+        raise ContractError(
+            f"Assignee mismatch: contract assigned to '{contract['assignee']}'"
+        )
 
     if contract["status"] != "in_progress":
-        raise ContractError(f"Can only update progress on 'in_progress' contracts, got '{contract['status']}'")
+        raise ContractError(
+            f"Can only update progress on 'in_progress' contracts, got '{contract['status']}'"
+        )
 
     now = _now_iso()
-    diligence = contract.get("diligence") or {"progress": None, "blockers": [], "next_check_in": None}
+    diligence = contract.get("diligence") or {
+        "progress": None,
+        "blockers": [],
+        "next_check_in": None,
+    }
 
     if progress is not None:
         diligence["progress"] = progress
@@ -231,6 +254,7 @@ def submit_contract(
     summary: str,
     files_changed: list[str],
     verification: str | None = None,
+    verification_passed: bool | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
     """Submit completed work."""
@@ -247,6 +271,7 @@ def submit_contract(
         "summary": summary,
         "files_changed": files_changed,
         "verification": verification,
+        "verification_passed": verification_passed,
         "notes": notes,
     }
     contract["status"] = "submitted"
@@ -271,7 +296,9 @@ def review_contract(
         raise ContractError(f"Only the delegator can review")
 
     if contract["status"] != "submitted":
-        raise ContractError(f"Can only review 'submitted' contracts, got '{contract['status']}'")
+        raise ContractError(
+            f"Can only review 'submitted' contracts, got '{contract['status']}'"
+        )
 
     now = _now_iso()
     contract["discernment"] = {
@@ -359,7 +386,9 @@ def reassign_contract(
         raise ContractError("No diligence timestamp; cannot verify staleness")
 
     if minutes_idle < 30:
-        raise ContractError(f"Contract updated {minutes_idle:.0f} minutes ago (requires 30 min inactivity)")
+        raise ContractError(
+            f"Contract updated {minutes_idle:.0f} minutes ago (requires 30 min inactivity)"
+        )
 
     diligence = contract.get("diligence") or {}
     next_check_in = diligence.get("next_check_in")
@@ -376,11 +405,127 @@ def reassign_contract(
     contract["updated_at"] = _now_iso()
 
     bg = contract["delegation"].get("background") or ""
-    contract["delegation"]["background"] = f"{bg}\nReassigned from {old_assignee} due to inactivity.".strip()
+    reassign_note = f"Reassigned from {old_assignee} due to inactivity."
+
+    # Append liveness info if available
+    try:
+        liveness = get_agent_liveness(root, old_assignee)
+        staleness = liveness.get("staleness_minutes")
+        if staleness is not None:
+            reassign_note += f" Last heartbeat {staleness} min ago."
+    except Exception:
+        pass
+
+    contract["delegation"]["background"] = f"{bg}\n{reassign_note}".strip()
 
     # Write to new path
     new_path = get_contract_path(root, new_assignee, contract["id"])
     write_contract_atomic(new_path, contract)
     # Remove old file
     path.unlink()
+    return contract
+
+
+def append_log_entry(
+    *,
+    root: Path,
+    caller_id: str,
+    contract_id: str,
+    entry_type: str,
+    message: str,
+    metadata: dict | None = None,
+) -> dict[str, Any]:
+    """Append an immutable log entry to a contract."""
+    validate_log_entry(entry_type=entry_type, message=message)
+
+    path, contract = find_contract_by_id(root, contract_id)
+
+    if contract["assignee"] != caller_id and contract["from"] != caller_id:
+        raise ContractError("Only contract participants can append logs")
+
+    log = contract.get("log", [])
+    entry = {
+        "timestamp": _now_iso(),
+        "author": caller_id,
+        "type": entry_type,
+        "message": message,
+        "metadata": metadata or {},
+    }
+    log.append(entry)
+    contract["log"] = log
+    contract["updated_at"] = _now_iso()
+    write_contract_atomic(path, contract)
+    return contract
+
+
+MAX_OUTPUT_BYTES = 10_000  # 10KB per stream
+
+
+def run_verification(
+    *,
+    root: Path,
+    caller_id: str,
+    contract_id: str,
+) -> dict[str, Any]:
+    """Run verification commands for a contract. Returns updated contract."""
+    path, contract = find_contract_by_id(root, contract_id)
+
+    if contract["assignee"] != caller_id and contract["from"] != caller_id:
+        raise ContractError("Only contract participants can run verification")
+
+    commands = contract.get("delegation", {}).get("verification") or []
+    if not commands:
+        raise ContractError("No verification commands defined for this contract")
+
+    now = _now_iso()
+    results = contract.get("verification_results", [])
+
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=str(root),
+            )
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+            truncated = (
+                len(stdout.encode()) > MAX_OUTPUT_BYTES
+                or len(stderr.encode()) > MAX_OUTPUT_BYTES
+            )
+            stdout = stdout[:MAX_OUTPUT_BYTES]
+            stderr = stderr[:MAX_OUTPUT_BYTES]
+
+            results.append(
+                {
+                    "run_at": now,
+                    "run_by": caller_id,
+                    "command": cmd,
+                    "exit_code": proc.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "passed": proc.returncode == 0,
+                    "truncated": truncated,
+                }
+            )
+        except subprocess.TimeoutExpired:
+            results.append(
+                {
+                    "run_at": now,
+                    "run_by": caller_id,
+                    "command": cmd,
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": "Command timed out after 120 seconds",
+                    "passed": False,
+                    "truncated": False,
+                }
+            )
+
+    contract["verification_results"] = results
+    contract["updated_at"] = _now_iso()
+    write_contract_atomic(path, contract)
     return contract

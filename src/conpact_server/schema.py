@@ -13,6 +13,7 @@ def validate_delegation(
     references: list[dict],
     constraints: list[str],
     acceptance_criteria: list[str],
+    verification: list[str] | None = None,
 ) -> None:
     """Validate required delegation fields. Raises ValueError on failure."""
     if not objective or not objective.strip():
@@ -35,6 +36,24 @@ def validate_delegation(
 
     if not acceptance_criteria:
         raise ValueError("'acceptance_criteria' must be a non-empty list")
+
+    if verification is not None:
+        if not isinstance(verification, list):
+            raise ValueError("'verification' must be a list of command strings")
+        for i, cmd in enumerate(verification):
+            if not isinstance(cmd, str) or not cmd.strip():
+                raise ValueError(f"'verification[{i}]' must be a non-empty string")
+
+
+VALID_LOG_TYPES = {"info", "decision", "blocker", "discovery"}
+
+
+def validate_log_entry(*, entry_type: str, message: str) -> None:
+    """Validate a log entry. Raises ValueError on failure."""
+    if entry_type not in VALID_LOG_TYPES:
+        raise ValueError(f"'type' must be one of {VALID_LOG_TYPES}, got '{entry_type}'")
+    if not message or not message.strip():
+        raise ValueError("'message' must be a non-empty string")
 
 
 def _slugify(text: str, max_words: int = 5, max_len: int = 40) -> str:

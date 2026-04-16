@@ -25,6 +25,8 @@ from conpact_server.contract import (
     review_contract,
     close_contract,
     reassign_contract,
+    append_log_entry,
+    run_verification,
     find_contracts_by_assignee,
     find_contract_by_id,
 )
@@ -35,15 +37,26 @@ from conpact_server.paths import (
     get_registry_path,
     is_initialized,
 )
-from conpact_server.registry import register_agent, list_agents
+from conpact_server.registry import (
+    register_agent,
+    list_agents,
+    heartbeat as registry_heartbeat,
+    get_agent_liveness,
+)
 
 
 def _error(msg: str) -> CallToolResult:
-    return CallToolResult(content=[TextContent(type="text", text=f"Error: {msg}")], isError=True)
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"Error: {msg}")], isError=True
+    )
 
 
 def _ok(data: Any) -> CallToolResult:
-    text = json.dumps(data, indent=2, ensure_ascii=False) if not isinstance(data, str) else data
+    text = (
+        json.dumps(data, indent=2, ensure_ascii=False)
+        if not isinstance(data, str)
+        else data
+    )
     return CallToolResult(content=[TextContent(type="text", text=text)])
 
 
@@ -64,9 +77,16 @@ TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {
-                "agent_id": {"type": "string", "description": "Unique identifier (e.g., 'claude-code')"},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Unique identifier (e.g., 'claude-code')",
+                },
                 "role": {"type": "string", "description": "Role description"},
-                "capabilities": {"type": "array", "items": {"type": "string"}, "description": "Capability tags"},
+                "capabilities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Capability tags",
+                },
             },
             "required": ["agent_id"],
         },
@@ -76,19 +96,49 @@ TOOLS = [
         description="Create a ConPact contract to delegate a task to another agent. 'objective' should be one sentence with concrete deliverables. 'do_items' lists what to do; 'do_not_items' what NOT to do. 'references' pairs each file path with a one-line purpose. 'acceptance_criteria' must be executable (e.g., 'test X passes').",
         inputSchema={
             "type": "object",
-            "required": ["caller_id", "assignee", "objective", "do_items", "do_not_items", "references", "constraints", "acceptance_criteria"],
+            "required": [
+                "caller_id",
+                "assignee",
+                "objective",
+                "do_items",
+                "do_not_items",
+                "references",
+                "constraints",
+                "acceptance_criteria",
+            ],
             "properties": {
                 "caller_id": {"type": "string", "description": "Your agent ID"},
-                "assignee": {"type": "string", "description": "Agent ID of the assignee"},
-                "objective": {"type": "string", "description": "One-sentence goal + deliverables"},
+                "assignee": {
+                    "type": "string",
+                    "description": "Agent ID of the assignee",
+                },
+                "objective": {
+                    "type": "string",
+                    "description": "One-sentence goal + deliverables",
+                },
                 "background": {"type": "string", "description": "Why this task exists"},
                 "do_items": {"type": "array", "items": {"type": "string"}},
                 "do_not_items": {"type": "array", "items": {"type": "string"}},
-                "references": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}, "purpose": {"type": "string"}}, "required": ["path", "purpose"]}},
+                "references": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "purpose": {"type": "string"},
+                        },
+                        "required": ["path", "purpose"],
+                    },
+                },
                 "constraints": {"type": "array", "items": {"type": "string"}},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                 "suggested_steps": {"type": "array", "items": {"type": "string"}},
                 "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                "verification": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Verification commands (e.g., ['pytest tests/', 'ruff check src/'])",
+                },
             },
         },
     ),
@@ -98,7 +148,9 @@ TOOLS = [
         inputSchema={
             "type": "object",
             "required": ["agent_id"],
-            "properties": {"agent_id": {"type": "string", "description": "Your agent ID"}},
+            "properties": {
+                "agent_id": {"type": "string", "description": "Your agent ID"}
+            },
         },
     ),
     Tool(
@@ -109,7 +161,10 @@ TOOLS = [
             "required": ["caller_id", "contract_id"],
             "properties": {
                 "caller_id": {"type": "string", "description": "Your agent ID"},
-                "contract_id": {"type": "string", "description": "The contract ID to claim"},
+                "contract_id": {
+                    "type": "string",
+                    "description": "The contract ID to claim",
+                },
             },
         },
     ),
@@ -124,7 +179,10 @@ TOOLS = [
                 "contract_id": {"type": "string"},
                 "progress": {"type": "string"},
                 "blockers": {"type": "array", "items": {"type": "string"}},
-                "next_check_in": {"type": "string", "description": "ISO 8601 timestamp"},
+                "next_check_in": {
+                    "type": "string",
+                    "description": "ISO 8601 timestamp",
+                },
             },
         },
     ),
@@ -140,6 +198,10 @@ TOOLS = [
                 "summary": {"type": "string"},
                 "files_changed": {"type": "array", "items": {"type": "string"}},
                 "verification": {"type": "string"},
+                "verification_passed": {
+                    "type": "boolean",
+                    "description": "Whether verification commands passed",
+                },
                 "notes": {"type": "string"},
             },
         },
@@ -153,7 +215,10 @@ TOOLS = [
             "properties": {
                 "caller_id": {"type": "string"},
                 "contract_id": {"type": "string"},
-                "review_status": {"type": "string", "enum": ["approved", "revision_needed"]},
+                "review_status": {
+                    "type": "string",
+                    "enum": ["approved", "revision_needed"],
+                },
                 "feedback": {"type": "string"},
                 "requested_changes": {"type": "array", "items": {"type": "string"}},
             },
@@ -207,6 +272,59 @@ TOOLS = [
             },
         },
     ),
+    Tool(
+        name="conpact_log",
+        description="Append an immutable log entry to a contract. Creates a shared audit trail for decisions, discoveries, blockers, and progress notes. Any contract participant (assignee or delegator) can append. Entries are append-only.",
+        inputSchema={
+            "type": "object",
+            "required": ["caller_id", "contract_id", "type", "message"],
+            "properties": {
+                "caller_id": {"type": "string", "description": "Your agent ID"},
+                "contract_id": {"type": "string", "description": "The contract ID"},
+                "type": {
+                    "type": "string",
+                    "enum": ["info", "decision", "blocker", "discovery"],
+                    "description": "Entry type",
+                },
+                "message": {"type": "string", "description": "Log message content"},
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional structured metadata",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="conpact_heartbeat",
+        description="Report agent liveness. Call periodically to indicate you are still active. Must be registered first.",
+        inputSchema={
+            "type": "object",
+            "required": ["agent_id"],
+            "properties": {
+                "agent_id": {"type": "string", "description": "Your agent ID"},
+                "current_status": {
+                    "type": "string",
+                    "enum": ["available", "busy"],
+                    "description": "Optional: update your status in the registry",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="conpact_verify",
+        description="Run verification commands defined in a contract's delegation. Captures command output, exit codes, and pass/fail status. Does not change contract status. Any participant can run verification at any time.",
+        inputSchema={
+            "type": "object",
+            "required": ["caller_id", "contract_id"],
+            "properties": {
+                "caller_id": {"type": "string", "description": "Your agent ID"},
+                "contract_id": {
+                    "type": "string",
+                    "description": "The contract ID to verify",
+                },
+            },
+        },
+    ),
 ]
 
 
@@ -247,6 +365,12 @@ async def handle_call_tool(name: str, arguments: dict | None) -> CallToolResult:
             return _handle_list(arguments)
         elif name == "conpact_reassign":
             return _handle_reassign(arguments)
+        elif name == "conpact_log":
+            return _handle_log(arguments)
+        elif name == "conpact_heartbeat":
+            return _handle_heartbeat(arguments)
+        elif name == "conpact_verify":
+            return _handle_verify(arguments)
         else:
             return _error(f"Unknown tool: {name}")
     except ContractError as e:
@@ -270,7 +394,9 @@ def _handle_init(args: dict) -> CallToolResult:
     (get_contracts_dir(root)).mkdir(parents=True)
     (get_archive_dir(root)).mkdir(parents=True)
     registry = get_registry_path(root)
-    registry.write_text(json.dumps({"updated_at": _now_iso(), "agents": []}), encoding="utf-8")
+    registry.write_text(
+        json.dumps({"updated_at": _now_iso(), "agents": []}), encoding="utf-8"
+    )
     return _ok("ConPact initialized")
 
 
@@ -300,19 +426,24 @@ def _handle_create(args: dict) -> CallToolResult:
         acceptance_criteria=args["acceptance_criteria"],
         suggested_steps=args.get("suggested_steps"),
         priority=args.get("priority", "medium"),
+        verification=args.get("verification"),
     )
     return _ok(contract)
 
 
 def _handle_check(args: dict) -> CallToolResult:
     root = _get_root(args)
-    contracts = find_contracts_by_assignee(root, args["agent_id"])
-    return _ok(contracts)
+    agent_id = args["agent_id"]
+    contracts = find_contracts_by_assignee(root, agent_id)
+    liveness = get_agent_liveness(root, agent_id)
+    return _ok({"contracts": contracts, "agent_liveness": liveness})
 
 
 def _handle_claim(args: dict) -> CallToolResult:
     root = _get_root(args)
-    contract = claim_contract(root=root, caller_id=args["caller_id"], contract_id=args["contract_id"])
+    contract = claim_contract(
+        root=root, caller_id=args["caller_id"], contract_id=args["contract_id"]
+    )
     return _ok(contract)
 
 
@@ -338,6 +469,7 @@ def _handle_submit(args: dict) -> CallToolResult:
         summary=args["summary"],
         files_changed=args["files_changed"],
         verification=args.get("verification"),
+        verification_passed=args.get("verification_passed"),
         notes=args.get("notes"),
     )
     return _ok(contract)
@@ -408,6 +540,52 @@ def _handle_reassign(args: dict) -> CallToolResult:
         new_assignee=args["new_assignee"],
     )
     return _ok(contract)
+
+
+def _handle_log(args: dict) -> CallToolResult:
+    root = _get_root(args)
+    contract = append_log_entry(
+        root=root,
+        caller_id=args["caller_id"],
+        contract_id=args["contract_id"],
+        entry_type=args["type"],
+        message=args["message"],
+        metadata=args.get("metadata"),
+    )
+    return _ok(contract)
+
+
+def _handle_heartbeat(args: dict) -> CallToolResult:
+    root = _get_root(args)
+    try:
+        entry = registry_heartbeat(
+            root=root,
+            agent_id=args["agent_id"],
+            current_status=args.get("current_status"),
+        )
+        return _ok(entry)
+    except ValueError as e:
+        return _error(str(e))
+
+
+def _handle_verify(args: dict) -> CallToolResult:
+    root = _get_root(args)
+    contract = run_verification(
+        root=root,
+        caller_id=args["caller_id"],
+        contract_id=args["contract_id"],
+    )
+    results = contract.get("verification_results", [])
+    commands = contract.get("delegation", {}).get("verification") or []
+    latest = results[-len(commands) :] if commands else []
+    return _ok(
+        {
+            "contract_id": contract["id"],
+            "status": contract["status"],
+            "latest_results": latest,
+            "all_passed": all(r["passed"] for r in latest) if latest else False,
+        }
+    )
 
 
 def run() -> None:

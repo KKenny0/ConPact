@@ -50,7 +50,7 @@ class TestListTools:
         result = asyncio.run(handle_list_tools()) if False else None
         import asyncio
         tools = asyncio.run(handle_list_tools())
-        assert len(tools) == 12
+        assert len(tools) == 15
         names = [t.name for t in tools]
         assert "conpact_init" in names
         assert "conpact_reassign" in names
@@ -78,7 +78,7 @@ class TestFullLifecycle:
         with tempfile.TemporaryDirectory() as tmp:
             root = _init_project(Path(tmp))
 
-            # Create
+            # Create with verification commands
             result = _call_sync(
                 "conpact_create",
                 _root=root,
@@ -90,21 +90,48 @@ class TestFullLifecycle:
                 references=[{"path": "file.py", "purpose": "Main"}],
                 constraints=["Python 3.11+"],
                 acceptance_criteria=["pytest passes"],
+                verification=["echo ok"],
             )
             assert not result.isError
             contract = json.loads(result.content[0].text)
             assert contract["status"] == "assigned"
+            assert contract["delegation"]["verification"] == ["echo ok"]
             cid = contract["id"]
 
             # Check
             result = _call_sync("conpact_check", _root=root, agent_id="codex")
             assert not result.isError
-            contracts = json.loads(result.content[0].text)
-            assert len(contracts) == 1
+            check_data = json.loads(result.content[0].text)
+            assert "contracts" in check_data
+            assert len(check_data["contracts"]) == 1
 
             # Claim
             result = _call_sync("conpact_claim", _root=root, caller_id="codex", contract_id=cid)
             assert not result.isError
+
+            # Log
+            result = _call_sync(
+                "conpact_log",
+                _root=root,
+                caller_id="codex",
+                contract_id=cid,
+                type="info",
+                message="Starting implementation",
+            )
+            assert not result.isError
+            contract = json.loads(result.content[0].text)
+            assert len(contract["log"]) == 1
+
+            # Verify
+            result = _call_sync(
+                "conpact_verify",
+                _root=root,
+                caller_id="codex",
+                contract_id=cid,
+            )
+            assert not result.isError
+            verify_data = json.loads(result.content[0].text)
+            assert verify_data["all_passed"] is True
 
             # Update progress
             result = _call_sync(
@@ -124,10 +151,12 @@ class TestFullLifecycle:
                 contract_id=cid,
                 summary="Implemented feature X",
                 files_changed=["file.py"],
+                verification_passed=True,
             )
             assert not result.isError
             contract = json.loads(result.content[0].text)
             assert contract["status"] == "submitted"
+            assert contract["result"]["verification_passed"] is True
 
             # Review (approve)
             result = _call_sync(

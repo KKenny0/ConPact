@@ -20,6 +20,8 @@ from conpact_server.contract import (
     review_contract,
     close_contract,
     reassign_contract,
+    append_log_entry,
+    run_verification,
     ContractError,
 )
 
@@ -218,3 +220,177 @@ class TestReviewContract:
             requested_changes=["Add unit tests"],
         )
         assert result["status"] == "revision_needed"
+
+
+class TestAppendLogEntry:
+    def _make_contract(self, project_dir: Path) -> str:
+        create_contract(
+            root=project_dir,
+            caller_id="claude-code",
+            assignee="codex",
+            objective="Implement feature X",
+            do_items=["Create file.py"],
+            do_not_items=[],
+            references=[{"path": "file.py", "purpose": "Main file"}],
+            constraints=["Python 3.11+"],
+            acceptance_criteria=["pytest passes"],
+        )
+        return find_contracts_by_assignee(project_dir, "codex")[0]["id"]
+
+    def test_append_info_entry(self, project_dir: Path):
+        cid = self._make_contract(project_dir)
+        result = append_log_entry(
+            root=project_dir,
+            caller_id="codex",
+            contract_id=cid,
+            entry_type="info",
+            message="Started reading reference files",
+        )
+        assert len(result["log"]) == 1
+        assert result["log"][0]["type"] == "info"
+        assert result["log"][0]["message"] == "Started reading reference files"
+        assert result["log"][0]["author"] == "codex"
+        assert result["log"][0]["timestamp"] is not None
+
+    def test_append_multiple_types(self, project_dir: Path):
+        cid = self._make_contract(project_dir)
+        for t in ["info", "decision", "blocker", "discovery"]:
+            append_log_entry(
+                root=project_dir,
+                caller_id="codex",
+                contract_id=cid,
+                entry_type=t,
+                message=f"Entry of type {t}",
+            )
+        _, contract = find_contract_by_id(project_dir, cid)
+        assert len(contract["log"]) == 4
+
+    def test_non_participant_rejected(self, project_dir: Path):
+        cid = self._make_contract(project_dir)
+        with pytest.raises(ContractError, match="participant"):
+            append_log_entry(
+                root=project_dir,
+                caller_id="random-agent",
+                contract_id=cid,
+                entry_type="info",
+                message="Should fail",
+            )
+
+    def test_delegator_can_append(self, project_dir: Path):
+        cid = self._make_contract(project_dir)
+        result = append_log_entry(
+            root=project_dir,
+            caller_id="claude-code",
+            contract_id=cid,
+            entry_type="decision",
+            message="Use JWT for auth",
+        )
+        assert len(result["log"]) == 1
+
+    def test_v1_contract_compat(self, project_dir: Path):
+        """V1 contract without 'log' field should work with log append."""
+        cid = self._make_contract(project_dir)
+        # Manually remove log field to simulate v1
+        path, contract = find_contract_by_id(project_dir, cid)
+        del contract["log"]
+        write_contract_atomic(path, contract)
+
+        result = append_log_entry(
+            root=project_dir,
+            caller_id="codex",
+            contract_id=cid,
+            entry_type="info",
+            message="Works on v1 contract",
+        )
+        assert len(result["log"]) == 1
+
+    def test_with_metadata(self, project_dir: Path):
+        cid = self._make_contract(project_dir)
+        result = append_log_entry(
+            root=project_dir,
+            caller_id="codex",
+            contract_id=cid,
+            entry_type="decision",
+            message="Chose approach A",
+            metadata={"file": "src/auth.py", "alternatives": ["A", "B"]},
+        )
+        assert result["log"][0]["metadata"]["file"] == "src/auth.py"
+
+
+class TestRunVerification:
+    def _make_contract_with_verification(self, project_dir: Path, commands: list[str]) -> str:
+        create_contract(
+            root=project_dir,
+            caller_id="claude-code",
+            assignee="codex",
+            objective="Implement feature X",
+            do_items=["Create file.py"],
+            do_not_items=[],
+            references=[{"path": "file.py", "purpose": "Main file"}],
+            constraints=["Python 3.11+"],
+            acceptance_criteria=["pytest passes"],
+            verification=commands,
+        )
+        return find_contracts_by_assignee(project_dir, "codex")[0]["id"]
+
+    def test_run_passing_command(self, project_dir: Path):
+        cid = self._make_contract_with_verification(project_dir, ["echo hello"])
+        result = run_verification(
+            root=project_dir,
+            caller_id="codex",
+            contract_id=cid,
+        )
+        assert len(result["verification_results"]) == 1
+        assert result["verification_results"][0]["passed"] is True
+        assert result["verification_results"][0]["exit_code"] == 0
+        assert "hello" in result["verification_results"][0]["stdout"]
+
+    def test_run_failing_command(self, project_dir: Path):
+        cid = self._make_contract_with_verification(project_dir, ["exit 1"])
+        result = run_verification(
+            root=project_dir,
+            caller_id="codex",
+            contract_id=cid,
+        )
+        assert result["verification_results"][0]["passed"] is False
+        assert result["verification_results"][0]["exit_code"] == 1
+
+    def test_no_verification_commands_raises(self, project_dir: Path):
+        create_contract(
+            root=project_dir,
+            caller_id="claude-code",
+            assignee="codex",
+            objective="Implement feature X",
+            do_items=["Create file.py"],
+            do_not_items=[],
+            references=[{"path": "file.py", "purpose": "Main file"}],
+            constraints=["Python 3.11+"],
+            acceptance_criteria=["pytest passes"],
+        )
+        cid = find_contracts_by_assignee(project_dir, "codex")[0]["id"]
+        with pytest.raises(ContractError, match="No verification commands"):
+            run_verification(root=project_dir, caller_id="codex", contract_id=cid)
+
+    def test_non_participant_rejected(self, project_dir: Path):
+        cid = self._make_contract_with_verification(project_dir, ["echo hello"])
+        with pytest.raises(ContractError, match="participant"):
+            run_verification(root=project_dir, caller_id="random-agent", contract_id=cid)
+
+    def test_multiple_commands(self, project_dir: Path):
+        cid = self._make_contract_with_verification(project_dir, ["echo first", "echo second"])
+        result = run_verification(
+            root=project_dir,
+            caller_id="codex",
+            contract_id=cid,
+        )
+        assert len(result["verification_results"]) == 2
+        assert all(r["passed"] for r in result["verification_results"])
+
+    def test_delegator_can_run(self, project_dir: Path):
+        cid = self._make_contract_with_verification(project_dir, ["echo hello"])
+        result = run_verification(
+            root=project_dir,
+            caller_id="claude-code",
+            contract_id=cid,
+        )
+        assert result["verification_results"][0]["passed"] is True

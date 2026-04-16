@@ -54,3 +54,39 @@ def list_agents(root: Path) -> list[dict[str, Any]]:
     """List all registered agents."""
     registry = _read_registry(root)
     return registry.get("agents", [])
+
+
+def heartbeat(*, root: Path, agent_id: str, current_status: str | None = None) -> dict[str, Any]:
+    """Update agent's heartbeat timestamp. Must be registered first."""
+    registry = _read_registry(root)
+    agents = registry.get("agents", [])
+
+    for i, a in enumerate(agents):
+        if a["id"] == agent_id:
+            agents[i]["last_heartbeat"] = _now_iso()
+            if current_status is not None:
+                agents[i]["status"] = current_status
+            registry["updated_at"] = _now_iso()
+            _write_registry(root, registry)
+            return agents[i]
+
+    raise ValueError(f"Agent '{agent_id}' not registered. Call conpact_register first.")
+
+
+def get_agent_liveness(root: Path, agent_id: str, threshold_minutes: int = 30) -> dict[str, Any]:
+    """Get liveness info for a specific agent."""
+    agents = list_agents(root)
+    for a in agents:
+        if a["id"] == agent_id:
+            last_hb = a.get("last_heartbeat")
+            if last_hb:
+                last_dt = datetime.fromisoformat(last_hb)
+                now = datetime.now(timezone.utc)
+                minutes_since = (now - last_dt).total_seconds() / 60
+                return {
+                    **a,
+                    "staleness_minutes": round(minutes_since, 1),
+                    "is_stale": minutes_since > threshold_minutes,
+                }
+            return {**a, "staleness_minutes": None, "is_stale": True}
+    return {"id": agent_id, "staleness_minutes": None, "is_stale": True, "status": "unknown"}
