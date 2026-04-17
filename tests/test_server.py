@@ -42,6 +42,12 @@ def _init_project(tmp: Path) -> Path:
     (agents_dir / "registry.json").write_text(
         json.dumps({"updated_at": "2026-04-14T00:00:00Z", "agents": []})
     )
+    (agents_dir / "project.json").write_text(
+        json.dumps({
+            "root": str(tmp.resolve()),
+            "initialized_at": "2026-04-14T00:00:00Z",
+        })
+    )
     return tmp
 
 
@@ -50,10 +56,11 @@ class TestListTools:
         result = asyncio.run(handle_list_tools()) if False else None
         import asyncio
         tools = asyncio.run(handle_list_tools())
-        assert len(tools) == 15
+        assert len(tools) == 16
         names = [t.name for t in tools]
         assert "conpact_init" in names
         assert "conpact_reassign" in names
+        assert "conpact_overview" in names
 
 
 class TestInitTool:
@@ -64,6 +71,11 @@ class TestInitTool:
             assert not result.isError
             assert (root / ".agents" / "contracts").is_dir()
             assert (root / ".agents" / "registry.json").exists()
+            assert (root / ".agents" / "project.json").exists()
+            project_data = json.loads(
+                (root / ".agents" / "project.json").read_text()
+            )
+            assert project_data["root"] == str(root.resolve())
 
     def test_init_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,3 +182,181 @@ class TestFullLifecycle:
             assert not result.isError
             contract = json.loads(result.content[0].text)
             assert contract["status"] == "closed"
+
+
+class TestProjectIsolation:
+    def test_uninitialized_project_rejected(self):
+        """Operations fail when conpact_init has not been called."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = _call_sync("conpact_check", _root=root, agent_id="agent-1")
+            assert result.isError
+            assert "Not initialized" in result.content[0].text
+
+    def test_wrong_root_rejected(self):
+        """Operations fail when project.json root doesn't match."""
+        with tempfile.TemporaryDirectory() as tmp_a, \
+             tempfile.TemporaryDirectory() as tmp_b:
+            root_a = _init_project(Path(tmp_a))
+            root_b = Path(tmp_b)
+
+            # root_b has .agents/project.json that claims to belong to root_a
+            agents_dir_b = root_b / ".agents"
+            agents_dir_b.mkdir()
+            (agents_dir_b / "project.json").write_text(
+                json.dumps({
+                    "root": str(root_a.resolve()),
+                    "initialized_at": "2026-04-14T00:00:00Z",
+                })
+            )
+
+            result = _call_sync("conpact_list", _root=root_b)
+            assert result.isError
+            assert "Project root mismatch" in result.content[0].text
+
+    def test_init_migrates_old_installation(self):
+        """conpact_init creates project.json on old .agents/ without it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents_dir = root / ".agents"
+            agents_dir.mkdir()
+            (agents_dir / "contracts").mkdir()
+            (agents_dir / "contracts" / "_archive").mkdir()
+            (agents_dir / "registry.json").write_text(
+                json.dumps({"updated_at": "2026-04-01T00:00:00Z", "agents": []})
+            )
+            # No project.json — old installation
+
+            result = _call_sync("conpact_init", _root=root)
+            assert not result.isError
+            assert (root / ".agents" / "project.json").exists()
+
+            # Operations should work now
+            result = _call_sync("conpact_check", _root=root, agent_id="agent-1")
+            assert not result.isError
+
+
+class TestOverviewTool:
+    def test_empty_project(self):
+        """Overview returns empty state for project with no contracts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _init_project(Path(tmp))
+            result = _call_sync("conpact_overview", _root=root, agent_id="agent-1")
+            assert not result.isError
+            data = json.loads(result.content[0].text)
+            assert data["contracts"] == []
+            assert data["agents"] == []
+            assert data["actions_for_you"] == ["No actions needed."]
+            assert data["blocking_on"] == []
+
+    def test_assigned_contract_shows_action(self):
+        """Overview suggests claim action when agent has assigned contracts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _init_project(Path(tmp))
+
+            # Create an assigned contract for codex
+            _call_sync(
+                "conpact_create",
+                _root=root,
+                caller_id="claude-code",
+                assignee="codex",
+                objective="Implement feature X",
+                do_items=["Create file.py"],
+                do_not_items=[],
+                references=[{"path": "file.py", "purpose": "Main file"}],
+                constraints=["Python 3.11+"],
+                acceptance_criteria=["pytest passes"],
+            )
+
+            # codex's overview should suggest claiming
+            result = _call_sync("conpact_overview", _root=root, agent_id="codex")
+            data = json.loads(result.content[0].text)
+            assert len(data["contracts"]) == 1
+            assert any("assigned contract" in a and "conpact_claim" in a
+                       for a in data["actions_for_you"])
+
+            # claude-code's overview should show no actions (delegator waits)
+            result = _call_sync("conpact_overview", _root=root, agent_id="claude-code")
+            data = json.loads(result.content[0].text)
+            assert data["actions_for_you"] == ["No actions needed."]
+
+    def test_submitted_contract_shows_review_action(self):
+        """Overview suggests review action for delegator when contract is submitted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _init_project(Path(tmp))
+
+            # Create, claim, and submit a contract
+            _call_sync(
+                "conpact_create",
+                _root=root,
+                caller_id="claude-code",
+                assignee="codex",
+                objective="Implement feature X",
+                do_items=["Create file.py"],
+                do_not_items=[],
+                references=[{"path": "file.py", "purpose": "Main file"}],
+                constraints=["Python 3.11+"],
+                acceptance_criteria=["pytest passes"],
+            )
+            cid = json.loads(
+                _call_sync("conpact_check", _root=root, agent_id="codex").content[0].text
+            )["contracts"][0]["id"]
+            _call_sync("conpact_claim", _root=root, caller_id="codex", contract_id=cid)
+            _call_sync(
+                "conpact_submit",
+                _root=root,
+                caller_id="codex",
+                contract_id=cid,
+                summary="Done",
+                files_changed=["file.py"],
+            )
+
+            # claude-code's overview should suggest review
+            result = _call_sync("conpact_overview", _root=root, agent_id="claude-code")
+            data = json.loads(result.content[0].text)
+            assert any("awaiting review" in a and "conpact_review" in a
+                       for a in data["actions_for_you"])
+
+    def test_revision_needed_shows_action_for_assignee(self):
+        """Overview suggests revision action for implementer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _init_project(Path(tmp))
+
+            # Full lifecycle to revision_needed
+            _call_sync(
+                "conpact_create",
+                _root=root,
+                caller_id="claude-code",
+                assignee="codex",
+                objective="Implement feature X",
+                do_items=["Create file.py"],
+                do_not_items=[],
+                references=[{"path": "file.py", "purpose": "Main file"}],
+                constraints=["Python 3.11+"],
+                acceptance_criteria=["pytest passes"],
+            )
+            cid = json.loads(
+                _call_sync("conpact_check", _root=root, agent_id="codex").content[0].text
+            )["contracts"][0]["id"]
+            _call_sync("conpact_claim", _root=root, caller_id="codex", contract_id=cid)
+            _call_sync(
+                "conpact_submit",
+                _root=root,
+                caller_id="codex",
+                contract_id=cid,
+                summary="Done",
+                files_changed=["file.py"],
+            )
+            _call_sync(
+                "conpact_review",
+                _root=root,
+                caller_id="claude-code",
+                contract_id=cid,
+                review_status="revision_needed",
+                feedback="Missing tests",
+            )
+
+            result = _call_sync("conpact_overview", _root=root, agent_id="codex")
+            data = json.loads(result.content[0].text)
+            assert any("revision" in a.lower() and "conpact_submit" in a
+                       for a in data["actions_for_you"])

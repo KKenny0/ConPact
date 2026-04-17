@@ -35,7 +35,9 @@ from conpact_server.paths import (
     get_contracts_dir,
     get_archive_dir,
     get_registry_path,
+    get_project_path,
     is_initialized,
+    validate_project_root,
 )
 from conpact_server.registry import (
     register_agent,
@@ -43,7 +45,6 @@ from conpact_server.registry import (
     heartbeat as registry_heartbeat,
     get_agent_liveness,
 )
-
 
 def _error(msg: str) -> CallToolResult:
     return CallToolResult(
@@ -93,7 +94,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_create",
-        description="Create a ConPact contract to delegate a task to another agent. 'objective' should be one sentence with concrete deliverables. 'do_items' lists what to do; 'do_not_items' what NOT to do. 'references' pairs each file path with a one-line purpose. 'acceptance_criteria' must be executable (e.g., 'test X passes').",
+        description="[delegator] When you want to delegate a task to another agent instead of implementing it yourself. 'objective' should be one sentence with concrete deliverables. 'do_items' lists what to do; 'do_not_items' what NOT to do. 'references' pairs each file path with a one-line purpose. 'acceptance_criteria' must be executable (e.g., 'test X passes'). The assignee will discover this contract via conpact_check or conpact_overview.",
         inputSchema={
             "type": "object",
             "required": [
@@ -144,7 +145,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_check",
-        description="Check for contracts assigned to you. Returns 'assigned' (new), 'revision_needed' (rework), and 'in_progress' (crash recovery). Call at session start and after completing tasks.",
+        description="[implementer] Call at session start to discover contracts assigned to you. Returns contracts with status 'assigned' (new tasks), 'revision_needed' (rework requested), and 'in_progress' (crash recovery). Prefer conpact_overview for a full project picture.",
         inputSchema={
             "type": "object",
             "required": ["agent_id"],
@@ -154,8 +155,22 @@ TOOLS = [
         },
     ),
     Tool(
+        name="conpact_overview",
+        description="[any] Call this first at session start or when you need a full project status. Returns all active contracts, registered agents, and personalized action suggestions for your role. This is the recommended entry point — most workflows start here.",
+        inputSchema={
+            "type": "object",
+            "required": ["agent_id"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Your agent ID, used to generate personalized action suggestions",
+                }
+            },
+        },
+    ),
+    Tool(
         name="conpact_claim",
-        description="Claim an assigned contract and start working. Transitions 'assigned' to 'in_progress'. Fails if already claimed. Always call before starting work.",
+        description="[implementer] After discovering an assigned contract (via conpact_check or conpact_overview), call this to start working. Transitions status from 'assigned' to 'in_progress'. You must be the assignee.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id"],
@@ -170,7 +185,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_update_progress",
-        description="Update progress on your contract. Merges provided fields; omitted fields preserved. Setting 'next_check_in' prevents premature reassignment.",
+        description="[implementer] While working on a claimed contract, call this to report progress or blockers. Setting 'next_check_in' tells the delegator when to expect an update and prevents premature reassignment.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id"],
@@ -188,7 +203,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_submit",
-        description="Submit completed work. 'summary' is what you did, 'files_changed' which files you modified. The delegator will review.",
+        description="[implementer] After finishing implementation and passing verification (conpact_verify), call this to submit your work for review. This is the last step before handing back to the delegator.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id", "summary", "files_changed"],
@@ -208,7 +223,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_review",
-        description="Review a submitted contract. 'approved' archives it; 'revision_needed' sends it back. Only the delegator can review.",
+        description="[delegator] When an implementer submits work (you'll see this in conpact_overview), review the changes and approve or request revisions. Only the original delegator (the 'from' field) can review.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id", "review_status"],
@@ -226,7 +241,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_close",
-        description="Force-close a contract regardless of status. Only the delegator can close. Provide a reason.",
+        description="[delegator] When a contract needs to be abandoned or cancelled (e.g., no longer relevant, blocked indefinitely). For normal completion, use conpact_review with status 'approved' instead.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id", "reason"],
@@ -239,7 +254,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_read",
-        description="Read the full details of a specific contract — delegation, diligence, result, discernment.",
+        description="[any] Call when you need full contract details (delegation spec, progress, result, review feedback). Usually called after conpact_overview identifies a contract you need to act on.",
         inputSchema={
             "type": "object",
             "required": ["contract_id"],
@@ -248,7 +263,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_list",
-        description="List contracts with optional filters. Use to get an overview of work in the project.",
+        description="[any] Call when you need to find contracts by specific criteria (status, assignee, delegator). For a general status check, prefer conpact_overview.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -261,7 +276,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_reassign",
-        description="Reassign a stale contract. Requires 30+ min inactivity AND next_check_in expired. Only the delegator can reassign.",
+        description="[delegator] When an assigned or in-progress contract has been stale for 30+ minutes and next_check_in has expired. Transfers the contract to a different agent.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id", "new_assignee"],
@@ -274,7 +289,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_log",
-        description="Append an immutable log entry to a contract. Creates a shared audit trail for decisions, discoveries, blockers, and progress notes. Any contract participant (assignee or delegator) can append. Entries are append-only.",
+        description="[any] While working on or reviewing a contract, record notable decisions, blockers, or discoveries to create a shared audit trail. For routine progress updates, use conpact_update_progress instead.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id", "type", "message"],
@@ -296,7 +311,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_heartbeat",
-        description="Report agent liveness. Call periodically to indicate you are still active. Must be registered first.",
+        description="[any] Call periodically (e.g., every few minutes during active work) to indicate you are still online. Prevents the fault detector from marking your contracts as stale. Must be registered first.",
         inputSchema={
             "type": "object",
             "required": ["agent_id"],
@@ -312,7 +327,7 @@ TOOLS = [
     ),
     Tool(
         name="conpact_verify",
-        description="Run verification commands defined in a contract's delegation. Captures command output, exit codes, and pass/fail status. Does not change contract status. Any participant can run verification at any time.",
+        description="[implementer] Before submitting (conpact_submit), run this to execute the verification commands defined in the contract's acceptance criteria. Also callable by the delegator to independently check results.",
         inputSchema={
             "type": "object",
             "required": ["caller_id", "contract_id"],
@@ -349,6 +364,8 @@ async def handle_call_tool(name: str, arguments: dict | None) -> CallToolResult:
             return _handle_create(arguments)
         elif name == "conpact_check":
             return _handle_check(arguments)
+        elif name == "conpact_overview":
+            return _handle_overview(arguments)
         elif name == "conpact_claim":
             return _handle_claim(arguments)
         elif name == "conpact_update_progress":
@@ -385,23 +402,46 @@ def _get_root(arguments: dict) -> Path:
     return Path(root)
 
 
+def _require_initialized(root: Path) -> CallToolResult | None:
+    """Returns an error result if project is not initialized, None otherwise."""
+    try:
+        validate_project_root(root)
+    except ValueError as e:
+        return _error(str(e))
+    return None
+
+
 def _handle_init(args: dict) -> CallToolResult:
     root = _get_root(args)
     agents_dir = get_agents_dir(root)
-    if agents_dir.is_dir():
+    project_path = get_project_path(root)
+
+    if agents_dir.is_dir() and project_path.exists():
         return _ok("ConPact already initialized")
-    agents_dir.mkdir(parents=True)
-    (get_contracts_dir(root)).mkdir(parents=True)
-    (get_archive_dir(root)).mkdir(parents=True)
+
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (get_contracts_dir(root)).mkdir(parents=True, exist_ok=True)
+    (get_archive_dir(root)).mkdir(parents=True, exist_ok=True)
     registry = get_registry_path(root)
-    registry.write_text(
-        json.dumps({"updated_at": _now_iso(), "agents": []}), encoding="utf-8"
+    if not registry.exists():
+        registry.write_text(
+            json.dumps({"updated_at": _now_iso(), "agents": []}), encoding="utf-8"
+        )
+    project_path.write_text(
+        json.dumps({
+            "root": str(root.resolve()),
+            "initialized_at": _now_iso(),
+        }),
+        encoding="utf-8",
     )
     return _ok("ConPact initialized")
 
 
 def _handle_register(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     entry = register_agent(
         root=root,
         agent_id=args["agent_id"],
@@ -413,6 +453,9 @@ def _handle_register(args: dict) -> CallToolResult:
 
 def _handle_create(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = create_contract(
         root=root,
         caller_id=args["caller_id"],
@@ -433,14 +476,96 @@ def _handle_create(args: dict) -> CallToolResult:
 
 def _handle_check(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     agent_id = args["agent_id"]
     contracts = find_contracts_by_assignee(root, agent_id)
     liveness = get_agent_liveness(root, agent_id)
     return _ok({"contracts": contracts, "agent_liveness": liveness})
 
 
+def _handle_overview(args: dict) -> CallToolResult:
+    root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
+    agent_id = args["agent_id"]
+
+    # Collect all active contracts
+    contracts_dir = get_contracts_dir(root)
+    all_contracts = []
+    if contracts_dir.exists():
+        for f in contracts_dir.glob("*.json"):
+            if f.name == "project.json":
+                continue
+            try:
+                c = json.loads(f.read_text(encoding="utf-8"))
+                all_contracts.append({
+                    "id": c.get("id", ""),
+                    "status": c.get("status", ""),
+                    "from": c.get("from", ""),
+                    "assignee": c.get("assignee", ""),
+                    "objective": c.get("delegation", {}).get("objective", ""),
+                    "updated_at": c.get("updated_at", ""),
+                })
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+    # Collect registered agents
+    agents = list_agents(root)
+    agent_summaries = []
+    for a in agents:
+        active = [c for c in all_contracts if c["assignee"] == a["id"] or c["from"] == a["id"]]
+        agent_summaries.append({
+            "id": a.get("id", ""),
+            "role": a.get("role", ""),
+            "status": a.get("status", "unknown"),
+            "last_heartbeat": a.get("last_heartbeat"),
+            "active_contracts": len(active),
+        })
+
+    # Generate personalized action suggestions
+    actions = []
+    blocking = []
+
+    for c in all_contracts:
+        if c["status"] == "assigned" and c["assignee"] == agent_id:
+            actions.append(
+                f"You have an assigned contract [{c['id']}]. "
+                f"→ conpact_read('{c['id']}') then conpact_claim('{c['id']}', caller_id='{agent_id}')"
+            )
+        elif c["status"] == "revision_needed" and c["assignee"] == agent_id:
+            actions.append(
+                f"You have a contract needing revision [{c['id']}]. "
+                f"→ conpact_read('{c['id']}') to see feedback, fix the issues, then conpact_submit('{c['id']}', ...)"
+            )
+        elif c["status"] == "submitted" and c["from"] == agent_id:
+            actions.append(
+                f"You have a contract awaiting review [{c['id']}, status: submitted]. "
+                f"→ conpact_read('{c['id']}') then review and conpact_review('{c['id']}', ...)"
+            )
+            blocking.append({"agent": agent_id, "reason": f"contract {c['id']} needs review"})
+        elif c["status"] == "in_progress" and c["from"] == agent_id:
+            blocking.append({"agent": c["assignee"], "reason": f"contract {c['id']} is in progress"})
+
+    if not actions:
+        actions.append("No actions needed.")
+
+    return _ok({
+        "project_root": str(root.resolve()),
+        "contracts": all_contracts,
+        "agents": agent_summaries,
+        "actions_for_you": actions,
+        "blocking_on": blocking,
+    })
+
+
 def _handle_claim(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = claim_contract(
         root=root, caller_id=args["caller_id"], contract_id=args["contract_id"]
     )
@@ -449,6 +574,9 @@ def _handle_claim(args: dict) -> CallToolResult:
 
 def _handle_update_progress(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = update_progress(
         root=root,
         caller_id=args["caller_id"],
@@ -462,6 +590,9 @@ def _handle_update_progress(args: dict) -> CallToolResult:
 
 def _handle_submit(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = submit_contract(
         root=root,
         caller_id=args["caller_id"],
@@ -477,6 +608,9 @@ def _handle_submit(args: dict) -> CallToolResult:
 
 def _handle_review(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = review_contract(
         root=root,
         caller_id=args["caller_id"],
@@ -490,6 +624,9 @@ def _handle_review(args: dict) -> CallToolResult:
 
 def _handle_close(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = close_contract(
         root=root,
         caller_id=args["caller_id"],
@@ -501,12 +638,18 @@ def _handle_close(args: dict) -> CallToolResult:
 
 def _handle_read(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     _, contract = find_contract_by_id(root, args["contract_id"])
     return _ok(contract)
 
 
 def _handle_list(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contracts_dir = get_contracts_dir(root)
     results = []
     search_dirs = [contracts_dir]
@@ -533,6 +676,9 @@ def _handle_list(args: dict) -> CallToolResult:
 
 def _handle_reassign(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = reassign_contract(
         root=root,
         caller_id=args["caller_id"],
@@ -544,6 +690,9 @@ def _handle_reassign(args: dict) -> CallToolResult:
 
 def _handle_log(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = append_log_entry(
         root=root,
         caller_id=args["caller_id"],
@@ -557,6 +706,9 @@ def _handle_log(args: dict) -> CallToolResult:
 
 def _handle_heartbeat(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     try:
         entry = registry_heartbeat(
             root=root,
@@ -570,6 +722,9 @@ def _handle_heartbeat(args: dict) -> CallToolResult:
 
 def _handle_verify(args: dict) -> CallToolResult:
     root = _get_root(args)
+    err = _require_initialized(root)
+    if err:
+        return err
     contract = run_verification(
         root=root,
         caller_id=args["caller_id"],
