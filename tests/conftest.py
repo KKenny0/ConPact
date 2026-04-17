@@ -21,4 +21,10 @@ def project_dir() -> Generator[Path, None, None]:
         (agents_dir / "registry.json").write_text(
             json.dumps({"updated_at": "2026-04-14T00:00:00Z", "agents": []})
         )
+        (agents_dir / "project.json").write_text(
+            json.dumps({
+                "root": str(root.resolve()),
+                "initialized_at": "2026-04-14T00:00:00Z",
+            })
+        )
         yield root
